@@ -1,0 +1,27 @@
+name: Fetch dictionary study data
+on:
+  push:
+    branches: [dictionary-data]
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download current English-Russian Wiktionary StarDict
+        run: |
+          mkdir -p data
+          curl -fL --retry 3 -o data/en-ru.tar.zst \
+            https://github.com/xxyzz/wiktionary_stardict/releases/download/20260928/en-ru.tar.zst
+          sha256sum data/en-ru.tar.zst
+      - name: Download selected Tatoeba English-Russian sentence pairs
+        run: |
+          curl -fL --retry 3 -o data/rus-eng.zip \
+            https://www.manythings.org/anki/rus-eng.zip
+          unzip -l data/rus-eng.zip | head
+      - name: Upload study sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: dictionary-study-sources
+          path: data/
+          compression-level: 0
