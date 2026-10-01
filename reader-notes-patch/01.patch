@@ -1,0 +1,185 @@
+   updateBookmarkFlag();
+ }
+ 
++void EpubReaderActivity::startAddNote(const bool reopenMenuOnCancel) {
++  if (!section || !epub || pendingNoteValid) return;
++
++  int currentPage = 0;
++  int pageCount = 0;
++  {
++    RenderLock lock;
++    currentPage = section->currentPage;
++    pageCount = section->estimatedTotalPages();
++  }
++
++  const SavedProgressPosition progress = ProgressMapper::toSavedProgress(epub, getCurrentPosition());
++  pendingNote = NoteEntry{};
++  pendingNote.percentage = progress.percentage;
++  pendingNote.xpath = progress.xpath;
++  pendingNote.computedSpineIndex = currentSpineIndex;
++  pendingNote.computedChapterPageCount = static_cast<uint16_t>(std::max(0, pageCount));
++  pendingNote.computedChapterProgress = static_cast<uint16_t>(std::max(0, currentPage));
++  const std::optional<uint32_t> offset =
++      currentPageVisibleOffset.has_value()
++          ? currentPageVisibleOffset
++          : (currentPage >= 0 && currentPage < section->pageCount)
++                ? section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage))
++                : std::nullopt;
++  if (offset.has_value()) {
++    pendingNote.visibleTextOffset = *offset;
++    pendingNote.hasVisibleTextOffset = true;
++  }
++  pendingNoteValid = true;
++
++  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_ADD_NOTE), "",
++                                                            NoteEntry::MAX_TEXT_LENGTH, InputType::Text);
++  if (!keyboard) {
++    LOG_ERR("NTE", "OOM: add-note keyboard");
++    pendingNoteValid = false;
++    return;
++  }
++
++  startActivityForResult(std::move(keyboard), [this, reopenMenuOnCancel](const ActivityResult& result) {
++    if (!pendingNoteValid) return;
++    if (result.isCancelled) {
++      pendingNoteValid = false;
++      if (reopenMenuOnCancel)
++        openReaderMenu();
++      else
++        requestUpdate();
++      return;
++    }
++
++    pendingNote.text = std::get<KeyboardResult>(result.data).text;
++    if (!pendingNote.text.empty()) {
++      std::vector<NoteEntry> notes;
++      NoteFile::load(epub->getPath(), notes);
++      // Newest first, matching the quick-note workflow: the note just written is
++      // immediately visible at the top of the list.
++      notes.insert(notes.begin(), std::move(pendingNote));
++      if (!NoteFile::save(epub->getPath(), notes)) LOG_ERR("NTE", "Failed to save note");
++    }
++    pendingNote = NoteEntry{};
++    pendingNoteValid = false;
++    requestUpdate();
++  });
++}
++
+ void EpubReaderActivity::addBookmark() {
+   if (!section || !epub) return;
+   LOG_DBG("ERS", "Toggle bookmark at spine %d, page %d", currentSpineIndex, section ? section->currentPage : -1);
+diff --git a/src/activities/reader/EpubReaderActivity.h b/src/activities/reader/EpubReaderActivity.h
+index a728476..31afb3b 100644
+--- a/src/activities/reader/EpubReaderActivity.h
++++ b/src/activities/reader/EpubReaderActivity.h
+@@ -11,6 +11,7 @@
+ #include <vector>
+ 
+ #include "BookmarkEntry.h"
++#include "NoteEntry.h"
+ #include "ChapterPosition.h"
+ #include "EpubReaderMenuActivity.h"
+ #include "ProgressMapper.h"
+@@ -50,6 +51,8 @@ class EpubReaderActivity final : public ReaderActivity {
+   unsigned long lastRenderCompleteMs = 0;
+   bool bookmarkRemoved = false;
+   std::vector<BookmarkEntry> cachedBookmarks;
++  NoteEntry pendingNote;
++  bool pendingNoteValid = false;
+   bool recentsEntryRemoved = false;
+   unsigned long bookmarkMessageTime = 0UL;
+   bool pendingReadFolderMove = false;
+@@ -169,6 +172,7 @@ class EpubReaderActivity final : public ReaderActivity {
+   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
+   void loadCachedBookmarks();
+   void addBookmark();
++  void startAddNote(bool reopenMenuOnCancel = false);
+   void updateBookmarkFlag();
+ 
+   void navigateToHref(const std::string& href, bool savePosition = false);
+diff --git a/src/activities/reader/EpubReaderMenuActivity.cpp b/src/activities/reader/EpubReaderMenuActivity.cpp
+index 613808c..1708793 100644
+--- a/src/activities/reader/EpubReaderMenuActivity.cpp
++++ b/src/activities/reader/EpubReaderMenuActivity.cpp
+@@ -48,6 +48,8 @@ void EpubReaderMenuActivity::buildMenuItems(std::vector<MenuItem>& items, bool h
+     items.push_back({MenuAction::BOOKMARKS, StrId::STR_BOOKMARKS});
+   }
+   items.push_back({MenuAction::TOGGLE_BOOKMARK, StrId::STR_TOGGLE_BOOKMARK});
++  items.push_back({MenuAction::NOTES, StrId::STR_NOTES});
++  items.push_back({MenuAction::ADD_NOTE, StrId::STR_ADD_NOTE});
+   items.push_back({MenuAction::NIGHT_MODE, StrId::STR_NIGHT_MODE});
+   if (Frontlight.present()) {
+     items.push_back({MenuAction::FRONTLIGHT, StrId::STR_FRONTLIGHT});
+diff --git a/src/activities/reader/EpubReaderMenuActivity.h b/src/activities/reader/EpubReaderMenuActivity.h
+index b9a5f52..ed0ec7f 100644
+--- a/src/activities/reader/EpubReaderMenuActivity.h
++++ b/src/activities/reader/EpubReaderMenuActivity.h
+@@ -22,6 +22,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
+     ROTATE_SCREEN,
+     BOOKMARKS,
+     TOGGLE_BOOKMARK,
++    NOTES,
++    ADD_NOTE,
+     SCREENSHOT,
+     DISPLAY_QR,
+     GO_HOME,
+@@ -49,7 +51,7 @@ class EpubReaderMenuActivity final : public UiListActivity {
+   // fixed-capacity array avoids any heap allocation for the row list. Labels
+   // are set once in the constructor (buildMenuRowItems()); buildScreen()
+   // only refreshes rows whose values reflect live state.
+-  static constexpr size_t MAX_MENU_ITEMS = 16;
++  static constexpr size_t MAX_MENU_ITEMS = 18;
+   freeink::ui::ListItem menuRowItems[MAX_MENU_ITEMS]{};
+   void buildMenuRowItems();
+ 
+diff --git a/src/activities/reader/EpubReaderNotesActivity.cpp b/src/activities/reader/EpubReaderNotesActivity.cpp
+new file mode 100644
+index 0000000..489e265
+--- /dev/null
++++ b/src/activities/reader/EpubReaderNotesActivity.cpp
+@@ -0,0 +1,250 @@
++#include "EpubReaderNotesActivity.h"
++
++#include <GfxRenderer.h>
++#include <I18n.h>
++#include <Logging.h>
++#include <Memory.h>
++
++#include <algorithm>
++
++#include "../../util/NoteFile.h"
++#include "MappedInputManager.h"
++#include "activities/util/KeyboardEntryActivity.h"
++#include "components/UITheme.h"
++#include "components/UiAppHelpers.h"
++#include "fontIds.h"
++
++namespace fui = freeink::ui;
++
++EpubReaderNotesActivity::EpubReaderNotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
++                                                 const std::shared_ptr<Epub>& epub, const std::string& epubPath)
++    : UiListActivity("EpubReaderNotes", renderer, mappedInput, /*wantsTouchLongPress=*/true),
++      epub(epub),
++      epubPath(epubPath) {}
++
++void EpubReaderNotesActivity::onEnter() {
++  UiListActivity::onEnter();
++  if (!epub) return;
++  if (!NoteFile::load(epubPath, notes)) notes.shrink_to_fit();
++  rebuildRows();
++}
++
++void EpubReaderNotesActivity::rebuildRows() {
++  noteSubtitles.clear();
++  noteRowItems.clear();
++  if (!epub) return;
++
++  noteSubtitles.reserve(notes.size());
++  noteRowItems.reserve(notes.size());
++  for (const auto& note : notes) {
++    const auto tocIndex = epub->getTocIndexForSpineIndex(note.computedSpineIndex);
++    const auto tocTitle = (tocIndex >= 0) ? epub->getTocItem(tocIndex).title : tr(STR_UNNAMED);
++    std::string subtitle = std::to_string(static_cast<int>(std::clamp(note.percentage, 0.0f, 1.0f) * 100.0f + 0.5f)) +
++                           "% - ";
++    if (note.computedChapterPageCount > 0) {
++      subtitle += std::to_string(note.computedChapterProgress + 1) + "/" +
