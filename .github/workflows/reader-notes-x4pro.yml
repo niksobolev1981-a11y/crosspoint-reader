@@ -22,8 +22,7 @@ jobs:
           cat reader-notes-patch/00.patch reader-notes-patch/01.patch reader-notes-patch/02.patch reader-notes-patch/03.patch > /tmp/reader-notes.patch
           git apply --check /tmp/reader-notes.patch
           git apply /tmp/reader-notes.patch
-          git apply --check reader-notes-patch/04-notebook-view.patch
-          git apply reader-notes-patch/04-notebook-view.patch
+          python reader-notes-patch/apply-notebook-view.py
           git diff --check
 
       - uses: actions/setup-python@v6
