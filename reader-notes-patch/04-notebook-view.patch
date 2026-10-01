@@ -1,0 +1,87 @@
+diff --git a/src/activities/reader/EpubReaderNotesActivity.cpp b/src/activities/reader/EpubReaderNotesActivity.cpp
+--- a/src/activities/reader/EpubReaderNotesActivity.cpp
++++ b/src/activities/reader/EpubReaderNotesActivity.cpp
+@@ -48,24 +48,8 @@ void EpubReaderNotesActivity::rebuildRows() {
+ }
+ 
+ void EpubReaderNotesActivity::openSelectedNote() {
+-  if (notes.empty() || nav.selected < 0 || nav.selected >= listCount()) return;
+-  const auto& note = notes.at(nav.selected);
+-  ProgressChangeResult result{};
+-  result.xpath = note.xpath;
+-  result.percentage = note.percentage;
+-  result.hasSavedProgress = true;
+-  result.hasVisibleTextOffset = note.hasVisibleTextOffset;
+-  result.visibleTextOffset = note.visibleTextOffset;
+-  result.spineIndex = note.computedSpineIndex;
+-  if (note.computedChapterPageCount > 0 && note.computedChapterProgress < note.computedChapterPageCount &&
+-      note.computedSpineIndex < epub->getSpineItemsCount()) {
+-    result.page = note.computedChapterProgress;
+-    result.totalPages = note.computedChapterPageCount;
+-  }
+-  setResult(std::move(result));
+-  finish();
++  if (notes.empty() || nav.selected < 0 || nav.selected >= listCount()) return;
++  viewingNote = true;
++  requestUpdate(true);
+ }
+ 
+ void EpubReaderNotesActivity::activateIndex(const int index) {
+@@ -95,6 +79,20 @@ bool EpubReaderNotesActivity::handleCustomInput() {
+ }
+ 
+ bool EpubReaderNotesActivity::handleButtons() {
++  if (viewingNote) {
++    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
++      viewingNote = false;
++      requestUpdate(true);
++      return true;
++    }
++    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
++      startEdit();
++      return true;
++    }
++    return false;
++  }
++
+   if (mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, ENTER_ACTIONS_MODE_MS)) {
+     showNoteActions();
+     return true;
+@@ -218,6 +216,28 @@ void EpubReaderNotesActivity::render(RenderLock&&) {
+       contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, tr(STR_NOTES), EpdFontFamily::BOLD)) / 2;
+   renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, tr(STR_NOTES), true, EpdFontFamily::BOLD);
+ 
++  if (viewingNote && !notes.empty() && nav.selected >= 0 && nav.selected < listCount()) {
++    const auto& metrics = UITheme::getInstance().getMetrics();
++    const int textX = contentX + metrics.contentSidePadding;
++    const int textWidth = contentWidth - 2 * metrics.contentSidePadding;
++    const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
++    int y = contentY + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing * 2;
++    const int hintsTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
++    const int maxLines = std::max(1, (hintsTop - y - metrics.verticalSpacing) / lineHeight);
++    const auto lines = renderer.wrappedText(UI_12_FONT_ID, notes[nav.selected].text.c_str(), textWidth, maxLines);
++    for (const auto& line : lines) {
++      renderer.drawText(UI_12_FONT_ID, textX, y, line.c_str());
++      y += lineHeight;
++    }
++
++    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_EDIT_NOTE), "", "");
++    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
++    renderer.displayBuffer();
++    return;
++  }
++
+   renderUi();
+   if (actionPopup.processRender(renderer, mappedInput)) return;
+ 
+diff --git a/src/activities/reader/EpubReaderNotesActivity.h b/src/activities/reader/EpubReaderNotesActivity.h
+--- a/src/activities/reader/EpubReaderNotesActivity.h
++++ b/src/activities/reader/EpubReaderNotesActivity.h
+@@ -17,6 +17,7 @@ class EpubReaderNotesActivity final : public UiListActivity {
+   std::vector<std::string> noteSubtitles;
+   std::vector<freeink::ui::ListItem> noteRowItems;
+   bool confirmingDelete = false;
++  bool viewingNote = false;
+   OptionPopup actionPopup;
+ 
+  public:
