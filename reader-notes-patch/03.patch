@@ -1,0 +1,218 @@
++  renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, tr(STR_NOTES), true, EpdFontFamily::BOLD);
++
++  renderUi();
++  if (actionPopup.processRender(renderer, mappedInput)) return;
++
++  const auto confirmLabel = notes.empty() ? "" : tr(STR_SELECT);
++  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
++  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
++  renderer.displayBuffer();
++}
+diff --git a/src/activities/reader/EpubReaderNotesActivity.h b/src/activities/reader/EpubReaderNotesActivity.h
+new file mode 100644
+index 0000000..5d38b62
+--- /dev/null
++++ b/src/activities/reader/EpubReaderNotesActivity.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++#include <Epub.h>
++
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "../../NoteEntry.h"
++#include "activities/UiListActivity.h"
++#include "components/OptionPopup.h"
++
++class EpubReaderNotesActivity final : public UiListActivity {
++  std::shared_ptr<Epub> epub;
++  std::string epubPath;
++  std::vector<NoteEntry> notes;
++  std::vector<std::string> noteSubtitles;
++  std::vector<freeink::ui::ListItem> noteRowItems;
++  bool confirmingDelete = false;
++  OptionPopup actionPopup;
++
++ public:
++  explicit EpubReaderNotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
++                                   const std::shared_ptr<Epub>& epub, const std::string& epubPath);
++  void onEnter() override;
++  void render(RenderLock&&) override;
++
++ private:
++  static constexpr int ENTER_ACTIONS_MODE_MS = 700;
++
++  int listCount() const override { return static_cast<int>(notes.size()); }
++  void buildScreen(UiScreen& screen) override;
++  void activateIndex(int index) override;
++  void onRowLongPress(int index) override;
++  bool handleCustomInput() override;
++  bool handleButtons() override;
++
++  void rebuildRows();
++  void openSelectedNote();
++  void startEdit();
++  void showNoteActions();
++  void showDeleteConfirmation();
++  void deleteSelectedNote();
++};
+diff --git a/src/activities/reader/ReaderActivity.cpp b/src/activities/reader/ReaderActivity.cpp
+index 83ebfd6..1e2b21c 100644
+--- a/src/activities/reader/ReaderActivity.cpp
++++ b/src/activities/reader/ReaderActivity.cpp
+@@ -177,8 +177,11 @@ void ReaderActivity::loop() {
+   if (handleEndOfBookPageTurn(prevTriggered, nextTriggered)) return;
+ 
+   const unsigned long heldMs = (touch.prev || touch.next) ? touch.heldMs : mappedInput.getHeldTime();
+-  const bool skip =
+-      !fromTilt && SETTINGS.longPressButtonBehavior == SETTINGS.CHAPTER_SKIP && heldMs >= ReaderUtils::SKIP_HOLD_MS;
++  const bool longPress = !fromTilt && heldMs >= ReaderUtils::SKIP_HOLD_MS;
++  // Notes are EPUB-only. On other reader formats consume the configured long
++  // press without turning a page; short releases still perform a normal turn.
++  if (longPress && SETTINGS.longPressButtonBehavior == SETTINGS.ADD_NOTE) return;
++  const bool skip = longPress && SETTINGS.longPressButtonBehavior == SETTINGS.CHAPTER_SKIP;
+ 
+   if (prevTriggered) {
+     if (skip) {
+diff --git a/src/util/HomeButtonInput.h b/src/util/HomeButtonInput.h
+index dbcf325..048dda0 100644
+--- a/src/util/HomeButtonInput.h
++++ b/src/util/HomeButtonInput.h
+@@ -15,6 +15,7 @@ enum class HomeButtonAction : uint8_t {
+   Dictionary,
+   ReaderMenu,
+   ToggleFrontlight,
++  AddNote,
+   Count
+ };
+ 
+diff --git a/src/util/NoteFile.cpp b/src/util/NoteFile.cpp
+new file mode 100644
+index 0000000..56630e1
+--- /dev/null
++++ b/src/util/NoteFile.cpp
+@@ -0,0 +1,63 @@
++#include "NoteFile.h"
++
++#include <ArduinoJson.h>
++#include <HalStorage.h>
++#include <Logging.h>
++#include <PersistableStore.h>
++
++#include "NoteUtil.h"
++
++bool NoteFile::load(const std::string& bookPath, std::vector<NoteEntry>& notes) {
++  notes.clear();
++
++  const std::string path = NoteUtil::getNotePath(bookPath);
++  JsonDocument doc;
++  if (!PersistableStoreBase::readDocFromFile(path.c_str(), doc)) return false;
++
++  JsonArray arr = doc["notes"].as<JsonArray>();
++  notes.reserve(arr.size());
++  for (JsonObject obj : arr) {
++    notes.emplace_back();
++    auto& note = notes.back();
++    note.text = obj["text"] | "";
++    if (note.text.size() > NoteEntry::MAX_TEXT_LENGTH) note.text.resize(NoteEntry::MAX_TEXT_LENGTH);
++    note.xpath = obj["xpath"] | "";
++    note.percentage = obj["percentage"] | static_cast<float>(0);
++    note.computedSpineIndex = obj["si"] | static_cast<uint16_t>(0);
++    note.computedChapterPageCount = obj["pc"] | static_cast<uint16_t>(0);
++    note.computedChapterProgress = obj["pp"] | static_cast<uint16_t>(0);
++    if (!obj["vo"].isNull()) {
++      note.visibleTextOffset = obj["vo"] | static_cast<uint32_t>(0);
++      note.hasVisibleTextOffset = true;
++    }
++  }
++
++  LOG_DBG("NTE", "Loaded %zu notes from file", notes.size());
++  return true;
++}
++
++bool NoteFile::save(const std::string& bookPath, const std::vector<NoteEntry>& notes) {
++  for (const auto& note : notes) {
++    if (note.text.size() > NoteEntry::MAX_TEXT_LENGTH) {
++      LOG_ERR("NTE", "Note text exceeds %zu bytes", NoteEntry::MAX_TEXT_LENGTH);
++      return false;
++    }
++  }
++
++  JsonDocument doc;
++  JsonArray arr = doc["notes"].to<JsonArray>();
++  for (const auto& note : notes) {
++    JsonObject obj = arr.add<JsonObject>();
++    obj["text"] = note.text;
++    obj["xpath"] = note.xpath;
++    obj["percentage"] = note.percentage;
++    obj["si"] = note.computedSpineIndex;
++    obj["pc"] = note.computedChapterPageCount;
++    obj["pp"] = note.computedChapterProgress;
++    if (note.hasVisibleTextOffset) obj["vo"] = note.visibleTextOffset;
++  }
++
++  Storage.mkdir(NoteUtil::getNotesDir().c_str());
++  const std::string path = NoteUtil::getNotePath(bookPath);
++  return PersistableStoreBase::writeDocToFile(path.c_str(), doc);
++}
+diff --git a/src/util/NoteFile.h b/src/util/NoteFile.h
+new file mode 100644
+index 0000000..f36a074
+--- /dev/null
++++ b/src/util/NoteFile.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++#include <string>
++#include <vector>
++
++#include "../NoteEntry.h"
++
++namespace NoteFile {
++
++bool load(const std::string& bookPath, std::vector<NoteEntry>& notes);
++bool save(const std::string& bookPath, const std::vector<NoteEntry>& notes);
++
++}  // namespace NoteFile
+diff --git a/src/util/NoteUtil.cpp b/src/util/NoteUtil.cpp
+new file mode 100644
+index 0000000..e22001e
+--- /dev/null
++++ b/src/util/NoteUtil.cpp
+@@ -0,0 +1,19 @@
++#include "NoteUtil.h"
++
++#include <algorithm>
++#include <string>
++
++std::string NoteUtil::getNotesDir() { return "/.crosspoint/notes/"; }
++
++std::string NoteUtil::getNotePath(const std::string& bookPath) {
++  // Mirror bookmark persistence: flatten the book path into a stable per-book
++  // filename while keeping notes separate from disposable EPUB caches.
++  std::string bookName = bookPath;
++  if (!bookName.empty() && bookName.front() == '/') bookName.erase(0, 1);
++  std::replace(bookName.begin(), bookName.end(), '/', '_');
++  std::replace(bookName.begin(), bookName.end(), '\\', '_');
++  const size_t lastDot = bookName.find_last_of('.');
++  if (lastDot != std::string::npos) bookName.erase(lastDot);
++  bookName += ".json";
++  return getNotesDir() + bookName;
++}
+diff --git a/src/util/NoteUtil.h b/src/util/NoteUtil.h
+new file mode 100644
+index 0000000..62c54cd
+--- /dev/null
++++ b/src/util/NoteUtil.h
+@@ -0,0 +1,9 @@
++#pragma once
++
++#include <string>
++
++class NoteUtil {
++ public:
++  static std::string getNotesDir();
++  static std::string getNotePath(const std::string& bookPath);
++};
