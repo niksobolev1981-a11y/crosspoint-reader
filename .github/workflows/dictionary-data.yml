@@ -25,3 +25,5 @@ jobs:
           name: dictionary-study-sources
           path: data/
           compression-level: 0
+
+# trigger
