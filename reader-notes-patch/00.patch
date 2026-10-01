@@ -1,0 +1,174 @@
+diff --git a/lib/I18n/translations/english.yaml b/lib/I18n/translations/english.yaml
+index 4567821..43297ae 100644
+--- a/lib/I18n/translations/english.yaml
++++ b/lib/I18n/translations/english.yaml
+@@ -288,6 +288,11 @@ STR_SELECT: "Select"
+ STR_SELECTED: "Selected"
+ STR_TOGGLE: "Toggle"
+ STR_TOGGLE_BOOKMARK: "Toggle Bookmark"
++STR_NOTES: "Notes"
++STR_ADD_NOTE: "Add Note"
++STR_NO_NOTES: "No notes"
++STR_EDIT_NOTE: "Edit Note"
++STR_CONFIRM_DELETE_NOTE: "Delete this note?"
+ STR_CONFIRM: "Confirm"
+ STR_CANCEL: "Cancel"
+ STR_CONNECT: "Connect"
+diff --git a/lib/I18n/translations/russian.yaml b/lib/I18n/translations/russian.yaml
+index 72fb564..9566e7b 100644
+--- a/lib/I18n/translations/russian.yaml
++++ b/lib/I18n/translations/russian.yaml
+@@ -288,6 +288,11 @@ STR_SELECT: "Выбрать"
+ STR_SELECTED: "Выбран"
+ STR_TOGGLE: "Выбор"
+ STR_TOGGLE_BOOKMARK: "Переключить закладку"
++STR_NOTES: "Заметки"
++STR_ADD_NOTE: "Добавить заметку"
++STR_NO_NOTES: "Нет заметок"
++STR_EDIT_NOTE: "Редактировать заметку"
++STR_CONFIRM_DELETE_NOTE: "Удалить эту заметку?"
+ STR_CONFIRM: "Подтвердить"
+ STR_CANCEL: "Отмена"
+ STR_CONNECT: "Подкл."
+diff --git a/src/CrossPointSettings.h b/src/CrossPointSettings.h
+index 73df56b..01c57a2 100644
+--- a/src/CrossPointSettings.h
++++ b/src/CrossPointSettings.h
+@@ -178,6 +178,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
+     OFF = 0,
+     CHAPTER_SKIP = 1,
+     ORIENTATION_CHANGE = 2,
++    ADD_NOTE = 3,
+     LONG_PRESS_BUTTON_BEHAVIOR_COUNT
+   };
+ 
+diff --git a/src/HomeButtonSettings.h b/src/HomeButtonSettings.h
+index c11579a..f9d2d27 100644
+--- a/src/HomeButtonSettings.h
++++ b/src/HomeButtonSettings.h
+@@ -8,7 +8,7 @@ namespace home_button {
+ inline constexpr StrId ACTION_LABELS[] = {StrId::STR_HOME_SHORTCUT, StrId::STR_IGNORE,           StrId::STR_PAGE_TURN,
+                                           StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES,        StrId::STR_CONFIRM,
+                                           StrId::STR_KOSYNC,        StrId::STR_BOOKMARK_OPTION,  StrId::STR_DICTIONARY,
+-                                          StrId::STR_READER_MENU,   StrId::STR_TOGGLE_FRONTLIGHT};
++                                          StrId::STR_READER_MENU,   StrId::STR_TOGGLE_FRONTLIGHT, StrId::STR_ADD_NOTE};
+ static_assert(sizeof(ACTION_LABELS) / sizeof(ACTION_LABELS[0]) == static_cast<unsigned>(HomeButtonAction::Count));
+ inline constexpr StrId GESTURE_LABELS[] = {StrId::STR_HOME_BUTTON_TAP, StrId::STR_HOME_BUTTON_DOUBLE_TAP,
+                                            StrId::STR_HOME_BUTTON_LONG_PRESS};
+diff --git a/src/NoteEntry.h b/src/NoteEntry.h
+new file mode 100644
+index 0000000..d9aed91
+--- /dev/null
++++ b/src/NoteEntry.h
+@@ -0,0 +1,23 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++// A reader note anchored to a precise EPUB position.
++struct NoteEntry {
++  // Bytes, not Unicode code points. KeyboardEntryActivity enforces the same
++  // byte-based limit, keeping persistence bounded on the embedded target.
++  static constexpr std::size_t MAX_TEXT_LENGTH = 512;
++
++  std::string text;
++  std::string xpath;
++  float percentage = 0.0f;
++
++  uint16_t computedSpineIndex = 0;
++  uint16_t computedChapterPageCount = 0;
++  uint16_t computedChapterProgress = 0;
++
++  bool hasVisibleTextOffset = false;
++  uint32_t visibleTextOffset = 0;
++};
+diff --git a/src/SettingsList.h b/src/SettingsList.h
+index 5171b64..cba5a6e 100644
+--- a/src/SettingsList.h
++++ b/src/SettingsList.h
+@@ -339,7 +339,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
+                             "frontButtonFollowOrientation", StrId::STR_CAT_CONTROLS),
+         SettingInfo::Enum(StrId::STR_LONG_PRESS_BEHAVIOR, &CrossPointSettings::longPressButtonBehavior,
+                           {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
+-                           StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION},
++                           StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION, StrId::STR_ADD_NOTE},
+                           "longPressButtonBehavior", StrId::STR_CAT_CONTROLS),
+         SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::longPressMenuFunction,
+                           buildLongPressMenuValues(), "longPressMenuFunction", StrId::STR_CAT_CONTROLS),
+diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
+index 2bde891..aae6c0f 100644
+--- a/src/activities/reader/EpubReaderActivity.cpp
++++ b/src/activities/reader/EpubReaderActivity.cpp
+@@ -25,6 +25,7 @@
+ #include "CrossPointState.h"
+ #include "DictionaryWordSelectActivity.h"
+ #include "EpubReaderBookmarksActivity.h"
++#include "EpubReaderNotesActivity.h"
+ #include "EpubReaderChapterSelectionActivity.h"
+ #include "EpubReaderFootnoteSelectActivity.h"
+ #include "EpubReaderPercentSelectionActivity.h"
+@@ -41,9 +42,11 @@
+ #include "RecentBooksStore.h"
+ #include "SdCardFontSystem.h"
+ #include "activities/settings/TextSettingsActivity.h"
++#include "activities/util/KeyboardEntryActivity.h"
+ #include "components/UITheme.h"
+ #include "fontIds.h"
+ #include "util/BookmarkUtil.h"
++#include "util/NoteFile.h"
+ #include "util/ButtonNavigator.h"
+ #include "util/ScreenshotUtil.h"
+ 
+@@ -495,6 +498,7 @@ void EpubReaderActivity::loop() {
+     case HomeButtonAction::Sync:
+     case HomeButtonAction::Dictionary:
+     case HomeButtonAction::Footnotes:
++    case HomeButtonAction::AddNote:
+       automaticPageTurnActive = false;
+       break;
+     default:
+@@ -582,6 +586,9 @@ void EpubReaderActivity::loop() {
+       case HomeButtonAction::Dictionary:
+         if (!showDictionaryMessage) openDictionaryWordSelect();
+         return;
++      case HomeButtonAction::AddNote:
++        startAddNote();
++        return;
+       case HomeButtonAction::ReaderMenu:
+         if (usesToolbarMenu() && section)
+           openOverlay(Overlay::Toolbar);
+@@ -672,6 +679,10 @@ void EpubReaderActivity::loop() {
+ 
+   const unsigned long heldMs = (touch.prev || touch.next) ? touch.heldMs : mappedInput.getHeldTime();
+   const bool longPress = !fromTilt && heldMs >= ReaderUtils::SKIP_HOLD_MS;
++  if (longPress && SETTINGS.longPressButtonBehavior == SETTINGS.ADD_NOTE) {
++    startAddNote();
++    return;
++  }
+   if (longPress && SETTINGS.longPressButtonBehavior == SETTINGS.CHAPTER_SKIP) {
+     skipPages(nextTriggered ? 1 : -1);
+     requestUpdate();
+@@ -933,6 +944,20 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction
+       launchKOReaderSync();
+       break;
+     }
++    case EpubReaderMenuActivity::MenuAction::NOTES: {
++      auto notesActivity = makeUniqueNoThrow<EpubReaderNotesActivity>(renderer, mappedInput, epub, epub->getPath());
++      if (!notesActivity) {
++        LOG_ERR("NTE", "OOM: notes list");
++        requestUpdate();
++        break;
++      }
++      startActivityForResult(std::move(notesActivity), progressChangeResultHandler);
++      break;
++    }
++    case EpubReaderMenuActivity::MenuAction::ADD_NOTE: {
++      startAddNote(/*reopenMenuOnCancel=*/true);
++      break;
++    }
+     case EpubReaderMenuActivity::MenuAction::BOOKMARKS: {
+       startActivityForResult(
+           std::make_unique<EpubReaderBookmarksActivity>(renderer, mappedInput, epub, epub->getPath()),
+@@ -2615,6 +2640,70 @@ void EpubReaderActivity::loadCachedBookmarks() {
