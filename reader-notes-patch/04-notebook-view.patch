@@ -1,7 +1,7 @@
 diff --git a/src/activities/reader/EpubReaderNotesActivity.cpp b/src/activities/reader/EpubReaderNotesActivity.cpp
 --- a/src/activities/reader/EpubReaderNotesActivity.cpp
 +++ b/src/activities/reader/EpubReaderNotesActivity.cpp
-@@ -48,24 +48,8 @@ void EpubReaderNotesActivity::rebuildRows() {
+@@ -48,22 +48,9 @@ void EpubReaderNotesActivity::rebuildRows() {
  }
  
  void EpubReaderNotesActivity::openSelectedNote() {
@@ -27,7 +27,7 @@ diff --git a/src/activities/reader/EpubReaderNotesActivity.cpp b/src/activities/
  }
  
  void EpubReaderNotesActivity::activateIndex(const int index) {
-@@ -95,6 +79,20 @@ bool EpubReaderNotesActivity::handleCustomInput() {
+@@ -95,6 +82,20 @@ bool EpubReaderNotesActivity::handleCustomInput() {
  }
  
  bool EpubReaderNotesActivity::handleButtons() {
@@ -47,7 +47,7 @@ diff --git a/src/activities/reader/EpubReaderNotesActivity.cpp b/src/activities/
    if (mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, ENTER_ACTIONS_MODE_MS)) {
      showNoteActions();
      return true;
-@@ -218,6 +216,28 @@ void EpubReaderNotesActivity::render(RenderLock&&) {
+@@ -218,6 +219,26 @@ void EpubReaderNotesActivity::render(RenderLock&&) {
        contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, tr(STR_NOTES), EpdFontFamily::BOLD)) / 2;
    renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, tr(STR_NOTES), true, EpdFontFamily::BOLD);
  
