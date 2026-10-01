@@ -1,0 +1,195 @@
++                  std::to_string(note.computedChapterPageCount) + " - ";
++    }
++    subtitle += tocTitle;
++    noteSubtitles.push_back(std::move(subtitle));
++
++    fui::ListItem item;
++    item.label = note.text.c_str();
++    item.subtitle = noteSubtitles.back().c_str();
++    item.icon = listIconFor(UIIcon::Text, 32);
++    item.actionValue = static_cast<int16_t>(noteRowItems.size());
++    noteRowItems.push_back(item);
++  }
++}
++
++void EpubReaderNotesActivity::openSelectedNote() {
++  if (notes.empty() || nav.selected < 0 || nav.selected >= listCount()) return;
++  const auto& note = notes.at(nav.selected);
++  ProgressChangeResult result{};
++  result.xpath = note.xpath;
++  result.percentage = note.percentage;
++  result.hasSavedProgress = true;
++  result.hasVisibleTextOffset = note.hasVisibleTextOffset;
++  result.visibleTextOffset = note.visibleTextOffset;
++  result.spineIndex = note.computedSpineIndex;
++  if (note.computedChapterPageCount > 0 && note.computedChapterProgress < note.computedChapterPageCount &&
++      note.computedSpineIndex < epub->getSpineItemsCount()) {
++    result.page = note.computedChapterProgress;
++    result.totalPages = note.computedChapterPageCount;
++  }
++  setResult(std::move(result));
++  finish();
++}
++
++void EpubReaderNotesActivity::activateIndex(const int index) {
++  if (actionPopup.isActive()) return;
++  if (index < 0 || index >= listCount()) return;
++  app.clearTapFlash();
++  nav.selected = index;
++  openSelectedNote();
++}
++
++void EpubReaderNotesActivity::onRowLongPress(const int index) {
++  if (actionPopup.isActive()) return;
++  if (index < 0 || index >= listCount()) return;
++  app.clearTapFlash();
++  nav.selected = index;
++  showNoteActions();
++}
++
++bool EpubReaderNotesActivity::handleCustomInput() {
++  if (actionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
++  if (confirmingDelete) {
++    confirmingDelete = false;
++    requestUpdate();
++    return true;
++  }
++  return false;
++}
++
++bool EpubReaderNotesActivity::handleButtons() {
++  if (mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, ENTER_ACTIONS_MODE_MS)) {
++    showNoteActions();
++    return true;
++  }
++  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
++    ActivityResult result;
++    result.isCancelled = true;
++    setResult(std::move(result));
++    finish();
++    return true;
++  }
++  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
++    openSelectedNote();
++    return true;
++  }
++  return false;
++}
++
++void EpubReaderNotesActivity::startEdit() {
++  if (notes.empty() || nav.selected < 0 || nav.selected >= listCount()) return;
++  app.clearTapFlash();
++  const int editIndex = nav.selected;
++  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_EDIT_NOTE),
++                                                            notes[editIndex].text, NoteEntry::MAX_TEXT_LENGTH,
++                                                            InputType::Text);
++  if (!keyboard) {
++    LOG_ERR("NTE", "OOM: note edit keyboard");
++    return;
++  }
++  startActivityForResult(std::move(keyboard), [this, editIndex](const ActivityResult& result) {
++    if (result.isCancelled || editIndex < 0 || editIndex >= listCount()) return;
++    std::string previousText = std::move(notes[editIndex].text);
++    notes[editIndex].text = std::get<KeyboardResult>(result.data).text;
++    if (notes[editIndex].text.empty()) {
++      notes[editIndex].text = std::move(previousText);
++      rebuildRows();
++      requestUpdate();
++      return;
++    }
++    rebuildRows();
++    if (!NoteFile::save(epubPath, notes)) {
++      LOG_ERR("NTE", "Failed to save notes after edit");
++      notes[editIndex].text = std::move(previousText);
++      rebuildRows();
++    }
++    requestUpdate();
++  });
++}
++
++void EpubReaderNotesActivity::showNoteActions() {
++  if (notes.empty() || actionPopup.isActive()) return;
++  const StrId options[] = {StrId::STR_OPEN, StrId::STR_EDIT_NOTE, StrId::STR_DELETE};
++  actionPopup.show(StrId::STR_NOTES, options, 3, 0, [this](const int idx) {
++    if (idx == 0)
++      openSelectedNote();
++    else if (idx == 1)
++      startEdit();
++    else if (idx == 2)
++      showDeleteConfirmation();
++  });
++  requestUpdate();
++}
++
++void EpubReaderNotesActivity::showDeleteConfirmation() {
++  if (notes.empty() || actionPopup.isActive()) return;
++  confirmingDelete = true;
++  const char* options[] = {tr(STR_CANCEL), tr(STR_DELETE)};
++  actionPopup.show(tr(STR_CONFIRM_DELETE_NOTE), options, 2, 0, [this](int idx) {
++    confirmingDelete = false;
++    if (idx == 1) deleteSelectedNote();
++    requestUpdate();
++  });
++  requestUpdate();
++}
++
++void EpubReaderNotesActivity::deleteSelectedNote() {
++  if (notes.empty() || nav.selected < 0 || nav.selected >= listCount()) return;
++  notes.erase(notes.begin() + nav.selected);
++  rebuildRows();
++  if (!NoteFile::save(epubPath, notes)) LOG_ERR("NTE", "Failed to save notes after delete");
++
++  if (nav.selected >= static_cast<int>(notes.size()) && nav.selected > 0) nav.selected--;
++  if (notes.empty()) {
++    nav.selected = 0;
++  } else {
++    nav.follow(listCount());
++  }
++  requestUpdate(true);
++}
++
++void EpubReaderNotesActivity::buildScreen(UiScreen& screen) {
++  const auto& metrics = UITheme::getInstance().getMetrics();
++  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
++  screen.setContentMarginFromScreen(fui::Insets{
++      static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
++      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
++      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)), static_cast<int16_t>(safe.x)});
++  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
++
++  if (notes.empty()) {
++    screen.centeredText(tr(STR_NO_NOTES), screen.theme().bodyText);
++    return;
++  }
++
++  if (!mappedInput.hasTouch()) {
++    const int helpLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
++    const fui::Rect band = screen.takeBottom(static_cast<int16_t>(helpLineHeight + metrics.verticalSpacing));
++    GUI.drawHelpText(renderer, Rect{band.x, band.y + metrics.verticalSpacing, band.width, helpLineHeight},
++                     tr(STR_HOLD_OPEN_FOR_ACTIONS));
++  }
++
++  fui::ListProps props;
++  props.items = noteRowItems.data();
++  props.count = static_cast<uint16_t>(noteRowItems.size());
++  props.action = ACTION_ROW;
++  props.inputMask = fui::InputTouch | fui::InputLongPress;
++  syncListViewport(screen, props);
++  screen.list(props);
++}
++
++void EpubReaderNotesActivity::render(RenderLock&&) {
++  renderer.clearScreen();
++
++  const auto pageWidth = renderer.getScreenWidth();
++  const auto orientation = renderer.getOrientation();
++  const bool isLandscapeCw = orientation == GfxRenderer::Orientation::LandscapeClockwise;
++  const bool isLandscapeCcw = orientation == GfxRenderer::Orientation::LandscapeCounterClockwise;
++  const bool isPortraitInverted = orientation == GfxRenderer::Orientation::PortraitInverted;
++  const int hintGutterWidth = (isLandscapeCw || isLandscapeCcw) ? 40 : 0;
++  const int contentX = isLandscapeCw ? hintGutterWidth : 0;
++  const int contentWidth = pageWidth - hintGutterWidth;
++  const int contentY = isPortraitInverted ? 50 : 0;
++
++  const int titleX =
++      contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, tr(STR_NOTES), EpdFontFamily::BOLD)) / 2;
